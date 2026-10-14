@@ -1,10 +1,13 @@
 """Detect only the COCO computer-mouse class in TurtleBot camera images."""
 
 import os
+from threading import Lock
 
 import cv2
 import numpy as np
 import rclpy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile
 from rclpy.qos import ReliabilityPolicy
@@ -53,7 +56,8 @@ class MouseDetector(Node):
         self.declare_parameter('model_path',
                                '/home/kim/yolo_webcam/yolov8n.pt')
         self.declare_parameter('confidence', 0.5)
-        self.declare_parameter('process_period', 0.2)
+        self.declare_parameter('process_period', 0.05)
+        self.declare_parameter('image_size', 416)
 
         model_path = os.path.expanduser(
             self.get_parameter('model_path').value)
@@ -66,8 +70,11 @@ class MouseDetector(Node):
             raise ValueError('Model class 64 must be the COCO mouse class')
 
         self.latest_image = None
+        self.image_lock = Lock()
         self.detected = False
         self.missed_frames = 0
+        self.camera_group = MutuallyExclusiveCallbackGroup()
+        self.inference_group = MutuallyExclusiveCallbackGroup()
         camera_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -76,31 +83,38 @@ class MouseDetector(Node):
         )
         image_topic = self.get_parameter('image_topic').value
         self.create_subscription(
-            Image, image_topic, self.image_callback, camera_qos)
+            Image, image_topic, self.image_callback, camera_qos,
+            callback_group=self.camera_group)
         self.status_pub = self.create_publisher(Bool, '/mouse_detected', 10)
         period = max(0.05, float(self.get_parameter('process_period').value))
-        self.create_timer(period, self.process_latest_image)
+        self.create_timer(
+            period, self.process_latest_image,
+            callback_group=self.inference_group)
         self.get_logger().info(
             f'Detecting COCO mouse (class 64) on {image_topic}')
 
     def image_callback(self, msg):
         """Keep only the newest camera frame for the next inference."""
-        self.latest_image = msg
+        with self.image_lock:
+            self.latest_image = msg
 
     def process_latest_image(self):
         """Run YOLO on one frame and publish a smoothed detection state."""
-        if self.latest_image is None:
+        with self.image_lock:
+            msg = self.latest_image
+            self.latest_image = None
+        if msg is None:
             return
-        msg = self.latest_image
-        self.latest_image = None
         try:
             frame = image_to_bgr(msg)
         except ValueError as exc:
             self.get_logger().error(str(exc))
             return
         confidence = float(self.get_parameter('confidence').value)
+        image_size = int(self.get_parameter('image_size').value)
         results = self.model.predict(
             frame, classes=[MOUSE_CLASS_ID], conf=confidence,
+            imgsz=image_size,
             verbose=False)
         found = bool(results and len(results[0].boxes) > 0)
         if found:
@@ -120,11 +134,14 @@ def main(args=None):
     """Run the camera detector with the existing YOLO virtual environment."""
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = MouseDetector()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
