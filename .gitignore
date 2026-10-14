@@ -1,0 +1,31 @@
+# Python and local tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+
+# Generated ROS output
+build/
+install/
+log/
+*.log
+*.db3
+*.mcap
+
+# Downloaded models, inference output, and recorded data
+*.pt
+*.pth
+*.onnx
+*.engine
+runs/
+datasets/
+*.csv
+*.mp4
+*.avi
+*.png
+*.jpg
+*.jpeg
